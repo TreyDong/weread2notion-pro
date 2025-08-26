@@ -467,8 +467,29 @@ class WeReadApi:
                 update_time = result.get('updateTime')
                 
                 # 获取书籍名称用于日志显示
-                book_title = book_data.get('title') or data.get('title') or '未知书名'
-                book_author = book_data.get('author') or data.get('author') or '未知作者'
+                book_title = book_data.get('title') or data.get('title')
+                book_author = book_data.get('author') or data.get('author')
+                
+                # 如果阅读信息API没有返回书名，尝试从书籍详情API获取
+                if not book_title or not book_author:
+                    logger.debug(f"获取阅读信息 - 阅读信息API未返回书名，尝试从书籍详情API获取 (bookId: {bookId})")
+                    try:
+                        book_info = self.get_bookinfo(bookId)
+                        if book_info:
+                            book_title = book_title or book_info.get('title', '未知书名')
+                            book_author = book_author or book_info.get('author', '未知作者')
+                            logger.debug(f"获取阅读信息 - 从书籍详情API获取到书名: {book_title}, 作者: {book_author}")
+                        else:
+                            book_title = book_title or '未知书名'
+                            book_author = book_author or '未知作者'
+                            logger.warning(f"获取阅读信息 - 无法从书籍详情API获取书名 (bookId: {bookId})")
+                    except Exception as e:
+                        book_title = book_title or '未知书名'
+                        book_author = book_author or '未知作者'
+                        logger.warning(f"获取阅读信息 - 获取书籍详情时发生异常: {str(e)} (bookId: {bookId})")
+                else:
+                    book_title = book_title or '未知书名'
+                    book_author = book_author or '未知作者'
                 
                 logger.info(f"获取阅读信息 - 成功获取书籍《{book_title}》(作者: {book_author}) 的阅读信息 (bookId: {bookId})")
                 logger.info(f"获取阅读信息 - 阅读详情: 阅读时长={reading_time}秒, 进度={progress}%, 开始阅读时间戳={start_reading_time}, 更新时间戳={update_time}")

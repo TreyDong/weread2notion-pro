@@ -88,9 +88,13 @@ def insert_book_to_notion(books, index, bookId, all_books_dict=None):
         100 if (book.get("markedStatus") == 4) else book.get("readingProgress", 0)
     ) / 100
     markedStatus = book.get("markedStatus")
+    readingProgress = book.get("readingProgress", 0)
     status = "想读"
     if markedStatus == 4:
         status = "已读"
+    elif readingProgress >= 100:  # 如果阅读进度为100%，设置状态为已读
+        status = "已读"
+        logger.info(f"   书籍《{book.get('title', '未知书名')}》阅读进度达到100%，自动设置状态为已读")
     elif book.get("readingTime", 0) >= 60:
         status = "在读"
     book["阅读状态"] = status
