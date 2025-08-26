@@ -281,7 +281,9 @@ class NotionHelper:
         )
 
     def get_month_relation_id(self, date):
-        month = date.strftime("%Y年%-m月")
+        # Windows不支持%-m格式，使用%m然后去掉前导零
+        month_num = str(int(date.strftime("%m")))
+        month = date.strftime("%Y年") + month_num + "月"
         start, end = get_first_and_last_day_of_month(date)
         properties = {"日期": get_date(format_date(start), format_date(end))}
         return self.get_relation_id(

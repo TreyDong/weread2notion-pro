@@ -2,6 +2,7 @@ import calendar
 from datetime import datetime
 from datetime import timedelta
 import hashlib
+import logging
 import os
 import re
 import requests
@@ -18,6 +19,8 @@ from weread2notionpro.config  import (
     SELECT,
 )
 import pendulum
+
+logger = logging.getLogger(__name__)
 
 MAX_LENGTH = (
     1024  # NOTION 2000个字符限制https://developers.notion.com/reference/request-limits
@@ -313,7 +316,7 @@ def upload_image(folder_path, filename, file_path):
     response = requests.post(upload_url, json=data)
 
     if response.status_code == 200:
-        print("File uploaded successfully.")
+        logger.info("File uploaded successfully.")
         return response.text
     else:
         return None
@@ -346,7 +349,7 @@ def download_image(url, save_dir="cover"):
 
     # 检查文件是否已经存在，如果存在则不进行下载
     if os.path.exists(save_path):
-        print(f"File {file_name} already exists. Skipping download.")
+        logger.info(f"File {file_name} already exists. Skipping download.")
         return save_path
 
     response = requests.get(url, stream=True)
@@ -354,9 +357,9 @@ def download_image(url, save_dir="cover"):
         with open(save_path, "wb") as file:
             for chunk in response.iter_content(chunk_size=128):
                 file.write(chunk)
-        print(f"Image downloaded successfully to {save_path}")
+        logger.info(f"Image downloaded successfully to {save_path}")
     else:
-        print(f"Failed to download image. Status code: {response.status_code}")
+        logger.error(f"Failed to download image. Status code: {response.status_code}")
     return save_path
 
 

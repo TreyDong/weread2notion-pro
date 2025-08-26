@@ -1,6 +1,7 @@
 from datetime import datetime
 from datetime import timedelta
 import os
+import logging
 
 import pendulum
 
@@ -73,12 +74,13 @@ def get_file():
         file_name = entries[0] if entries else None
         return file_name
     else:
-        print("OUT_FOLDER does not exist.")
+        logger.error("OUT_FOLDER does not exist.")
         return None
 
 HEATMAP_GUIDE = "https://mp.weixin.qq.com/s?__biz=MzI1OTcxOTI4NA==&mid=2247484145&idx=1&sn=81752852420b9153fc292b7873217651&chksm=ea75ebeadd0262fc65df100370d3f983ba2e52e2fcde2deb1ed49343fbb10645a77570656728&token=157143379&lang=zh_CN#rd"
 
 
+logger = logging.getLogger(__name__)
 notion_helper = NotionHelper()
 weread_api = WeReadApi()
 def main():
@@ -91,9 +93,9 @@ def main():
                 block_id=notion_helper.heatmap_block_id, url=heatmap_url
             )
         else:
-            print(f"更新热力图失败，没有添加热力图占位。具体参考：{HEATMAP_GUIDE}")
+            logger.error(f"更新热力图失败，没有添加热力图占位。具体参考：{HEATMAP_GUIDE}")
     else:
-        print(f"更新热力图失败，没有生成热力图。具体参考：{HEATMAP_GUIDE}")
+        logger.error(f"更新热力图失败，没有生成热力图。具体参考：{HEATMAP_GUIDE}")
     api_data = weread_api.get_api_data()
     readTimes = {int(key): value for key, value in api_data.get("readTimes").items()}
     now = pendulum.now("Asia/Shanghai").start_of("day")
