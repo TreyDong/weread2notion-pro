@@ -3,7 +3,10 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import datetime
+from time import perf_counter
+from typing import Any, Dict, Optional
 
 import requests
 from requests.utils import cookiejar_from_dict
@@ -57,6 +60,8 @@ WEREAD_HISTORY_URL = "https://weread.qq.com/web/readdata/summary?synckey=0"
 
 
 class WeReadApi:
+    REQUEST_LOG_PREVIEW = 800
+
     def __init__(self):
         self.cookie = self.get_cookie()
         self.session = requests.Session()
@@ -66,6 +71,7 @@ class WeReadApi:
             'Accept': 'application/json, text/plain, */*',
             'Content-Type': 'application/json'
         })
+        self._request_meta: Dict[str, Dict[str, Any]] = {}
 
     def try_get_cloud_cookie(self, url, id, password):
         if url.endswith("/"):
@@ -100,17 +106,136 @@ class WeReadApi:
 
     def parse_cookie_string(self):
         cookies_dict = {}
-        
+
         # 使用正则表达式解析 cookie 字符串
         pattern = re.compile(r'([^=]+)=([^;]+);?\s*')
         matches = pattern.findall(self.cookie)
-        
+
         for key, value in matches:
             cookies_dict[key] = value.encode('unicode_escape').decode('ascii')
         # 直接使用 cookies_dict 创建 cookiejar
         cookiejar = cookiejar_from_dict(cookies_dict)
-        
+
         return cookiejar
+
+    def _truncate_string(self, value: Optional[str]) -> str:
+        if value is None:
+            return "None"
+        if len(value) > self.REQUEST_LOG_PREVIEW:
+            return f"{value[:self.REQUEST_LOG_PREVIEW]}... (截断, 原长度 {len(value)})"
+        return value
+
+    def _serialize_for_log(self, payload: Any) -> str:
+        if payload is None:
+            return "None"
+        try:
+            if isinstance(payload, (dict, list)):
+                text = json.dumps(payload, ensure_ascii=False, default=str)
+            else:
+                text = str(payload)
+        except Exception:
+            text = repr(payload)
+        return self._truncate_string(text)
+
+    def _safe_response_preview(self, response: requests.Response) -> str:
+        try:
+            content_type = response.headers.get('Content-Type', '')
+        except Exception:
+            content_type = ''
+
+        try:
+            if content_type and 'application/json' in content_type:
+                payload = response.json()
+                text = json.dumps(payload, ensure_ascii=False, default=str)
+            else:
+                text = response.text or ''
+        except Exception:
+            try:
+                text = response.text or ''
+            except Exception:
+                text = '<无法读取响应内容>'
+        return self._truncate_string(text)
+
+    def _start_request_log(self, name: str, method: str, url: str, **kwargs) -> str:
+        suffix = uuid.uuid4().hex[:8]
+        request_id = f"{name}-{suffix}" if name else suffix
+        start_time = perf_counter()
+        self._request_meta[request_id] = {
+            'start': start_time,
+            'name': name or method,
+        }
+        current_time = datetime.now().isoformat()
+        logger.info(f"[{request_id}] {name or method} - 开始 {method.upper()} 请求: {url}")
+        logger.info(f"[{request_id}] 请求发起时间: {current_time}")
+
+        params = kwargs.get('params')
+        if params:
+            logger.info(f"[{request_id}] 请求params: {self._serialize_for_log(params)}")
+
+        data = kwargs.get('data')
+        if data:
+            logger.info(f"[{request_id}] 请求data: {self._serialize_for_log(data)}")
+
+        json_body = kwargs.get('json')
+        if json_body:
+            logger.info(f"[{request_id}] 请求json: {self._serialize_for_log(json_body)}")
+
+        headers = kwargs.get('headers')
+        if headers:
+            logger.debug(f"[{request_id}] 请求头: {self._serialize_for_log(headers)}")
+
+        cookies = kwargs.get('cookies')
+        if cookies:
+            try:
+                if hasattr(cookies, 'get_dict'):
+                    cookies_repr = cookies.get_dict()
+                else:
+                    cookies_repr = dict(cookies)
+            except Exception:
+                cookies_repr = str(cookies)
+            logger.debug(f"[{request_id}] 请求cookies: {self._serialize_for_log(cookies_repr)}")
+
+        timeout = kwargs.get('timeout')
+        if timeout:
+            logger.debug(f"[{request_id}] 请求timeout: {timeout}")
+
+        return request_id
+
+    def _finish_request_log(self, request_id: str, response: Optional[requests.Response] = None, error: Optional[Exception] = None) -> None:
+        meta = self._request_meta.pop(request_id, {})
+        start_time = meta.get('start')
+        duration = perf_counter() - start_time if start_time is not None else None
+        end_time = datetime.now().isoformat()
+        name = meta.get('name', request_id)
+
+        if response is not None:
+            logger.info(f"[{request_id}] {name} - 响应状态: {response.status_code}")
+            logger.info(f"[{request_id}] 响应接收时间: {end_time}")
+            if duration is not None:
+                logger.info(f"[{request_id}] 请求耗时: {duration:.3f} 秒")
+            try:
+                headers_repr = dict(response.headers)
+            except Exception:
+                headers_repr = '<无法读取响应头>'
+            logger.debug(f"[{request_id}] 响应头: {self._serialize_for_log(headers_repr)}")
+            logger.info(f"[{request_id}] 响应内容: {self._safe_response_preview(response)}")
+        elif error is not None:
+            logger.error(f"[{request_id}] {name} - 请求异常: {str(error)}")
+            logger.error(f"[{request_id}] 异常时间: {end_time}")
+            if duration is not None:
+                logger.error(f"[{request_id}] 请求耗时: {duration:.3f} 秒")
+
+    def _send_request(self, name: str, method: str, url: str, *, use_session: bool = True, **kwargs) -> requests.Response:
+        method_upper = method.upper()
+        request_id = self._start_request_log(name, method_upper, url, **kwargs)
+        caller = self.session.request if use_session else requests.request
+        try:
+            response = caller(method_upper, url, **kwargs)
+        except Exception as exc:
+            self._finish_request_log(request_id, error=exc)
+            raise
+        self._finish_request_log(request_id, response=response)
+        return response
 
     def get_bookshelf(self, retry_count=0):
         """获取书架信息"""
@@ -118,13 +243,8 @@ class WeReadApi:
         try:
             url = "https://weread.qq.com/web/shelf/sync"
             headers = dict(self.session.headers)
-            logger.info(f"请求URL: {url}")
-            logger.debug(f"请求头: {headers}")
-            
-            self.session.get(WEREAD_URL)
-            r = self.session.get(url, headers=headers)
-            logger.info(f"书架API响应状态: {r.status_code}")
-            logger.debug(f"响应头: {dict(r.headers)}")
+            self._send_request("BOOKSHELF_PREFLIGHT", "GET", WEREAD_URL)
+            r = self._send_request("BOOKSHELF", "GET", url, headers=headers)
             
             if r.ok:
                 data = r.json()
@@ -189,13 +309,8 @@ class WeReadApi:
         logger.info("正在获取笔记本列表...")
         try:
             headers = dict(self.session.headers)
-            logger.info(f"请求URL: {WEREAD_NOTEBOOKS_URL}")
-            logger.debug(f"请求头: {headers}")
-            
-            self.session.get(WEREAD_URL)
-            r = self.session.get(WEREAD_NOTEBOOKS_URL, headers=headers)
-            logger.info(f"笔记本API响应状态: {r.status_code}")
-            logger.debug(f"响应头: {dict(r.headers)}")
+            self._send_request("NOTEBOOK_PREFLIGHT", "GET", WEREAD_URL)
+            r = self._send_request("GET_NOTEBOOK_LIST", "GET", WEREAD_NOTEBOOKS_URL, headers=headers)
             
             if r.ok:
                 data = r.json()
@@ -258,16 +373,10 @@ class WeReadApi:
     def get_bookinfo(self, bookId, retry_count=0):
         """获取书的详情"""
         headers = dict(self.session.headers)
-        logger.info(f"获取书籍信息 - 请求URL: {WEREAD_BOOK_INFO}")
-        logger.info(f"获取书籍信息 - 请求参数: bookId={bookId}")
-        logger.debug(f"获取书籍信息 - 请求头: {headers}")
-        
-        self.session.get(WEREAD_URL)
         params = dict(bookId=bookId)
-        r = self.session.get(WEREAD_BOOK_INFO, params=params, headers=headers)
-        logger.info(f"获取书籍信息 - 响应状态: {r.status_code}")
-        logger.debug(f"获取书籍信息 - 响应头: {dict(r.headers)}")
-        
+        self._send_request("BOOKINFO_PREFLIGHT", "GET", WEREAD_URL)
+        r = self._send_request("GET_BOOK_INFO", "GET", WEREAD_BOOK_INFO, params=params, headers=headers)
+
         if r.ok:
             data = r.json()
             logger.info(f"获取书籍信息 - 完整原始响应: {data}")
@@ -306,15 +415,9 @@ class WeReadApi:
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_bookmark_list(self, bookId, retry_count=0):
         headers = dict(self.session.headers)
-        logger.info(f"获取标注列表 - 请求URL: {WEREAD_BOOKMARKLIST_URL}")
-        logger.info(f"获取标注列表 - 请求参数: bookId={bookId}")
-        logger.debug(f"获取标注列表 - 请求头: {headers}")
-        
-        self.session.get(WEREAD_URL)
+        self._send_request("BOOKMARK_PREFLIGHT", "GET", WEREAD_URL)
         params = dict(bookId=bookId)
-        r = self.session.get(WEREAD_BOOKMARKLIST_URL, params=params, headers=headers)
-        logger.info(f"获取标注列表 - 响应状态: {r.status_code}")
-        logger.debug(f"获取标注列表 - 响应头: {dict(r.headers)}")
+        r = self._send_request("GET_BOOKMARK_LIST", "GET", WEREAD_BOOKMARKLIST_URL, params=params, headers=headers)
         
         if r.ok:
             data = r.json()
@@ -356,25 +459,26 @@ class WeReadApi:
             'Content-Type': 'application/json',
         }
         
-        logger.info(f"获取阅读信息 - 请求URL: {WEREAD_READ_INFO_URL}")
-        logger.info(f"获取阅读信息 - 请求参数: bookId={bookId}")
-        logger.debug(f"获取阅读信息 - 请求头: {headers}")
-        
+        logger.info(f"获取阅读信息 - 正在查询书籍 {bookId} 的阅读详情")
+
         try:
-            # 直接请求API，不先访问主页，模仿TypeScript版本
             params = {'bookId': bookId}
-            logger.info(f"获取阅读信息 - 发起请求，参数: {params}")
-            # 避免Cookie冲突，只记录Cookie数量
             try:
                 cookie_count = len(list(self.session.cookies))
-                logger.debug(f"获取阅读信息 - 请求cookies数量: {cookie_count}")
+                logger.debug(f"获取阅读信息 - 当前cookies数量: {cookie_count}")
             except Exception as e:
                 logger.debug(f"获取阅读信息 - 无法获取cookies信息: {str(e)}")
-            
-            r = requests.get(WEREAD_READ_INFO_URL, params=params, headers=headers, cookies=self.session.cookies, timeout=30)
-            logger.info(f"获取阅读信息 - 响应状态: {r.status_code}")
-            logger.debug(f"获取阅读信息 - 响应头: {dict(r.headers)}")
-            logger.debug(f"获取阅读信息 - 响应内容预览: {r.text[:500] if r.text else 'None'}...")
+
+            r = self._send_request(
+                "GET_READ_INFO",
+                "GET",
+                WEREAD_READ_INFO_URL,
+                use_session=False,
+                params=params,
+                headers=headers,
+                cookies=self.session.cookies,
+                timeout=30,
+            )
             
             if r.ok:
                 data = r.json()
@@ -523,7 +627,15 @@ class WeReadApi:
             }
             
             # 发送HEAD请求到主页
-            r = requests.head(WEREAD_URL, headers=headers, cookies=self.session.cookies, timeout=30)
+            r = self._send_request(
+                "REFRESH_COOKIE",
+                "HEAD",
+                WEREAD_URL,
+                use_session=False,
+                headers=headers,
+                cookies=self.session.cookies,
+                timeout=30,
+            )
             
             # 检查是否有新的Cookie
             if 'Set-Cookie' in r.headers:
@@ -543,15 +655,9 @@ class WeReadApi:
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_review_list(self, bookId):
         headers = dict(self.session.headers)
-        logger.info(f"获取想法列表 - 请求URL: {WEREAD_REVIEW_LIST_URL}")
-        logger.info(f"获取想法列表 - 请求参数: bookId={bookId}")
-        logger.debug(f"获取想法列表 - 请求头: {headers}")
-        
-        self.session.get(WEREAD_URL)
         params = dict(bookId=bookId, listType=11, mine=1, synckey=0)
-        r = self.session.get(WEREAD_REVIEW_LIST_URL, params=params, headers=headers)
-        logger.info(f"获取想法列表 - 响应状态: {r.status_code}")
-        logger.debug(f"获取想法列表 - 响应头: {dict(r.headers)}")
+        self._send_request("REVIEW_PREFLIGHT", "GET", WEREAD_URL)
+        r = self._send_request("GET_REVIEW_LIST", "GET", WEREAD_REVIEW_LIST_URL, params=params, headers=headers)
         
         if r.ok:
             data = r.json()
@@ -587,13 +693,8 @@ class WeReadApi:
     
     def get_api_data(self):
         headers = dict(self.session.headers)
-        logger.info(f"获取历史数据 - 请求URL: {WEREAD_HISTORY_URL}")
-        logger.debug(f"获取历史数据 - 请求头: {headers}")
-        
-        self.session.get(WEREAD_URL)
-        r = self.session.get(WEREAD_HISTORY_URL, headers=headers)
-        logger.info(f"获取历史数据 - 响应状态: {r.status_code}")
-        logger.debug(f"获取历史数据 - 响应头: {dict(r.headers)}")
+        self._send_request("HISTORY_PREFLIGHT", "GET", WEREAD_URL)
+        r = self._send_request("GET_HISTORY", "GET", WEREAD_HISTORY_URL, headers=headers)
         
         if r.ok:
             data = r.json()
@@ -618,15 +719,9 @@ class WeReadApi:
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_chapter_info(self, bookId):
         headers = dict(self.session.headers)
-        logger.info(f"获取章节信息 - 请求URL: {WEREAD_CHAPTER_INFO}")
-        logger.info(f"获取章节信息 - 请求参数: bookId={bookId}")
-        logger.debug(f"获取章节信息 - 请求头: {headers}")
-        
-        self.session.get(WEREAD_URL)
         body = {"bookIds": [bookId], "synckeys": [0], "teenmode": 0}
-        r = self.session.post(WEREAD_CHAPTER_INFO, json=body, headers=headers)
-        logger.info(f"获取章节信息 - 响应状态: {r.status_code}")
-        logger.debug(f"获取章节信息 - 响应头: {dict(r.headers)}")
+        self._send_request("CHAPTER_PREFLIGHT", "GET", WEREAD_URL)
+        r = self._send_request("GET_CHAPTER_INFO", "POST", WEREAD_CHAPTER_INFO, json=body, headers=headers)
         
         if r.ok:
             data = r.json()

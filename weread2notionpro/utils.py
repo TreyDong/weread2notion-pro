@@ -1,12 +1,17 @@
+import base64
 import calendar
 from datetime import datetime
 from datetime import timedelta
 import hashlib
+import json
 import logging
 import os
 import re
+import uuid
+from time import perf_counter
+from typing import Any, Dict
+
 import requests
-import base64
 from weread2notionpro.config  import (
     RICH_TEXT,
     URL,
@@ -20,11 +25,102 @@ from weread2notionpro.config  import (
 )
 import pendulum
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('weread2notionpro.weread_api')
 
 MAX_LENGTH = (
     1024  # NOTION 2000个字符限制https://developers.notion.com/reference/request-limits
 )
+
+REQUEST_LOG_PREVIEW = 800
+
+
+def _truncate_for_log(value: str) -> str:
+    if value is None:
+        return "None"
+    if len(value) > REQUEST_LOG_PREVIEW:
+        return f"{value[:REQUEST_LOG_PREVIEW]}... (截断, 原长度 {len(value)})"
+    return value
+
+
+def _serialize_payload(payload: Any) -> str:
+    if payload is None:
+        return "None"
+    try:
+        if isinstance(payload, (dict, list)):
+            text = json.dumps(payload, ensure_ascii=False, default=str)
+        else:
+            text = str(payload)
+    except Exception:
+        text = repr(payload)
+    return _truncate_for_log(text)
+
+
+def _serialize_response(response: requests.Response) -> str:
+    try:
+        content_type = response.headers.get('Content-Type', '')
+    except Exception:
+        content_type = ''
+
+    try:
+        if content_type and 'application/json' in content_type:
+            payload = response.json()
+            text = json.dumps(payload, ensure_ascii=False, default=str)
+        else:
+            text = response.text or ''
+    except Exception:
+        try:
+            text = response.text or ''
+        except Exception:
+            text = '<无法读取响应正文>'
+    return _truncate_for_log(text)
+
+
+def _log_http_request(name: str, method: str, url: str, *, log_response_body: bool = True, **kwargs) -> requests.Response:
+    request_id = f"UTILS-{name}-{uuid.uuid4().hex[:8]}"
+    start = perf_counter()
+    start_time = datetime.now().isoformat()
+    logger.info(f"[{request_id}] {name} - 开始 {method.upper()} 请求: {url}")
+    logger.info(f"[{request_id}] 请求发起时间: {start_time}")
+
+    if 'params' in kwargs and kwargs['params'] is not None:
+        logger.info(f"[{request_id}] 请求params: {_serialize_payload(kwargs['params'])}")
+    if 'data' in kwargs and kwargs['data'] is not None:
+        logger.info(f"[{request_id}] 请求data: {_serialize_payload(kwargs['data'])}")
+    if 'json' in kwargs and kwargs['json'] is not None:
+        logger.info(f"[{request_id}] 请求json: {_serialize_payload(kwargs['json'])}")
+
+    headers = kwargs.get('headers')
+    if headers:
+        logger.debug(f"[{request_id}] 请求头: {_serialize_payload(headers)}")
+
+    if kwargs.get('stream'):
+        logger.debug(f"[{request_id}] 请求stream: {kwargs['stream']}")
+
+    try:
+        response = requests.request(method.upper(), url, **kwargs)
+    except Exception as exc:
+        duration = perf_counter() - start
+        logger.error(f"[{request_id}] {name} - 请求异常: {str(exc)}")
+        logger.error(f"[{request_id}] 请求耗时: {duration:.3f} 秒")
+        raise
+
+    duration = perf_counter() - start
+    end_time = datetime.now().isoformat()
+    logger.info(f"[{request_id}] {name} - 响应状态: {response.status_code}")
+    logger.info(f"[{request_id}] 响应接收时间: {end_time}")
+    logger.info(f"[{request_id}] 请求耗时: {duration:.3f} 秒")
+    try:
+        headers_repr: Dict[str, Any] = dict(response.headers)
+    except Exception:
+        headers_repr = {'error': '无法读取响应头'}
+    logger.debug(f"[{request_id}] 响应头: {_serialize_payload(headers_repr)}")
+
+    if log_response_body and not kwargs.get('stream'):
+        logger.info(f"[{request_id}] 响应内容: {_serialize_response(response)}")
+    else:
+        logger.info(f"[{request_id}] 响应内容: <流式响应，未记录正文>")
+
+    return response
 
 
 def get_heading(level, content):
@@ -313,7 +409,7 @@ def upload_image(folder_path, filename, file_path):
     # 构建请求的JSON数据
     data = {"file": content_base64, "filename": filename, "folder": folder_path}
 
-    response = requests.post(upload_url, json=data)
+    response = _log_http_request("UPLOAD_IMAGE", "POST", upload_url, json=data)
 
     if response.status_code == 200:
         logger.info("File uploaded successfully.")
@@ -352,7 +448,7 @@ def download_image(url, save_dir="cover"):
         logger.info(f"File {file_name} already exists. Skipping download.")
         return save_path
 
-    response = requests.get(url, stream=True)
+    response = _log_http_request("DOWNLOAD_IMAGE", "GET", url, stream=True, log_response_body=False)
     if response.status_code == 200:
         with open(save_path, "wb") as file:
             for chunk in response.iter_content(chunk_size=128):
@@ -360,6 +456,7 @@ def download_image(url, save_dir="cover"):
         logger.info(f"Image downloaded successfully to {save_path}")
     else:
         logger.error(f"Failed to download image. Status code: {response.status_code}")
+    response.close()
     return save_path
 
 
