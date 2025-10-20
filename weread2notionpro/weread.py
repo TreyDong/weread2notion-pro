@@ -24,9 +24,11 @@ def get_bookmark_list(page_id, bookId):
             {"property": "blockId", "rich_text": {"is_not_empty": True}},
         ]
     }
+    logger.info(f"开始查询已有划线，page_id={page_id}")
     results = notion_helper.query_all_by_book(
         notion_helper.bookmark_database_id, filter
     )
+    logger.info(f"Notion现有划线记录: {len(results)} 条")
     dict1 = {
         get_rich_text_from_result(x, "bookmarkId"): get_rich_text_from_result(
             x, "blockId"
@@ -35,10 +37,15 @@ def get_bookmark_list(page_id, bookId):
     }
     dict2 = {get_rich_text_from_result(x, "blockId"): x.get("id") for x in results}
     bookmarks = weread_api.get_bookmark_list(bookId)
+    logger.info(f"微信读书返回划线: {len(bookmarks)} 条")
+    reused_count = 0
     for i in bookmarks:
         if i.get("bookmarkId") in dict1:
             i["blockId"] = dict1.pop(i.get("bookmarkId"))
+            reused_count += 1
+    logger.info(f"划线匹配现有块: {reused_count} 条, 待删除多余块: {len(dict1)} 条")
     for blockId in dict1.values():
+        logger.info(f"删除冗余划线block {blockId}")
         notion_helper.delete_block(blockId)
         notion_helper.delete_block(dict2.get(blockId))
     return bookmarks
@@ -52,7 +59,9 @@ def get_review_list(page_id,bookId):
             {"property": "blockId", "rich_text": {"is_not_empty": True}},
         ]
     }
+    logger.info(f"开始查询已有想法，page_id={page_id}")
     results = notion_helper.query_all_by_book(notion_helper.review_database_id, filter)
+    logger.info(f"Notion现有想法记录: {len(results)} 条")
     dict1 = {
         get_rich_text_from_result(x, "reviewId"): get_rich_text_from_result(
             x, "blockId"
@@ -61,10 +70,15 @@ def get_review_list(page_id,bookId):
     }
     dict2 = {get_rich_text_from_result(x, "blockId"): x.get("id") for x in results}
     reviews = weread_api.get_review_list(bookId)
+    logger.info(f"微信读书返回想法: {len(reviews)} 条")
+    reused_count = 0
     for i in reviews:
         if i.get("reviewId") in dict1:
             i["blockId"] = dict1.pop(i.get("reviewId"))
+            reused_count += 1
+    logger.info(f"想法匹配现有块: {reused_count} 条, 待删除多余块: {len(dict1)} 条")
     for blockId in dict1.values():
+        logger.info(f"删除冗余想法block {blockId}")
         notion_helper.delete_block(blockId)
         notion_helper.delete_block(dict2.get(blockId))
     return reviews
@@ -148,7 +162,7 @@ def sort_notes(page_id, chapter, bookmark_list):
 
 
 def append_blocks(id, contents):
-    logger.info(f"笔记数{len(contents)}")
+    logger.info(f"准备写入 {len(contents)} 条内容块到页面 {id}")
     before_block_id = ""
     block_children = notion_helper.get_block_children(id)
     if len(block_children) > 0 and block_children[0].get("type") == "table_of_contents":
@@ -222,16 +236,32 @@ def content_to_block(content):
 
 
 def append_blocks_to_notion(id, blocks, after, contents):
+    logger.info(
+        "向页面 %s 追加 %d 个块 (after=%s)",
+        id,
+        len(blocks),
+        after,
+    )
     response = notion_helper.append_blocks_after(
         block_id=id, children=blocks, after=after
     )
     results = response.get("results")
+    logger.info(f"追加结果返回 {len(results)} 个块")
     l = []
     for index, content in enumerate(contents):
         result = results[index]
+        logger.debug(
+            "追加块%d: id=%s, type=%s",
+            index + 1,
+            result.get("id"),
+            result.get("type"),
+        )
         if content.get("abstract") != None and content.get("abstract") != "":
             notion_helper.append_blocks(
                 block_id=result.get("id"), children=[get_quote(content.get("abstract"))]
+            )
+            logger.debug(
+                "在块 %s 下追加引用摘要", result.get("id")
             )
         content["blockId"] = result.get("id")
         l.append(content)
@@ -313,4 +343,3 @@ if __name__ == "__main__":
     if target_book_id:
         logger.info(f"命令行指定同步书籍ID: {target_book_id}")
     main(target_book_id)
-
