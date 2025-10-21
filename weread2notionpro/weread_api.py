@@ -42,6 +42,13 @@ file_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
+# 将同样的handler附加到root logger，便于其他模块复用
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+for handler in logger.handlers:
+    if handler not in root_logger.handlers:
+        root_logger.addHandler(handler)
+
 # 避免重复日志
 logger.propagate = False
 
